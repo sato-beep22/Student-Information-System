@@ -3,6 +3,11 @@ require_once __DIR__ . '/../includes/auth.php';
 requireAdmin();
 
 $pdo = getDb();
+
+$flashSuccess = $_SESSION['flash_success'] ?? null;
+$flashError = $_SESSION['flash_error'] ?? null;
+unset($_SESSION['flash_success'], $_SESSION['flash_error']);
+
 $search = trim($_GET['q'] ?? '');
 $perPage = 5;
 $page = max(1, (int) ($_GET['page'] ?? 1));
@@ -17,17 +22,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && csrf_verify()) {
         if ($student_id > 0) {
             if ($section_id > 0) {
                 // Check capacity before assigning
-                $capStmt = $pdo->prepare('
-                    SELECT s.capacity, COUNT(u.user_id) as student_count
-                    FROM tbl_sections s
-                    LEFT JOIN tbl_users u ON u.section_id = s.section_id AND u.role = "student" AND u.user_id != ?
-                    WHERE s.section_id = ?
-                    GROUP BY s.section_id
-                ');
-                $capStmt->execute([$student_id, $section_id]);
-                $section = $capStmt->fetch();
+                require_once __DIR__ . '/../includes/functions/academic.php';
+                $capacityInfo = getSectionCapacityInfo($section_id, $student_id);
 
-                if ($section && (int)($section['student_count'] ?? 0) >= (int)($section['capacity'] ?? 0)) {
+                if ($capacityInfo['is_full']) {
                     $_SESSION['flash_error'] = 'Cannot assign student. The selected section is already full.';
                 } else {
                     $stmt = $pdo->prepare('UPDATE tbl_users SET section_id = ? WHERE user_id = ? AND role = "student"');

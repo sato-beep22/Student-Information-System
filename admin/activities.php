@@ -117,6 +117,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && csrf_verify()) {
         
         $_SESSION['flash_success'] = 'Activity deleted successfully.';
         redirect(base_url('admin/activities.php'));
+    } elseif ($action === 'check') {
+        $uploadId = (int) ($_POST['upload_id'] ?? 0);
+        
+        if (!$uploadId) {
+            $_SESSION['flash_error'] = 'Invalid submission ID.';
+            redirect(base_url('admin/activities.php'));
+        }
+        
+        // Only mark student submissions (enrollment_id IS NOT NULL)
+        $stmt = $pdo->prepare('
+            SELECT upload_id FROM tbl_activity_uploads 
+            WHERE upload_id = ? AND enrollment_id IS NOT NULL
+        ');
+        $stmt->execute([$uploadId]);
+        
+        if (!$stmt->fetch()) {
+            $_SESSION['flash_error'] = 'Submission not found.';
+            redirect(base_url('admin/activities.php'));
+        }
+        
+        $update = $pdo->prepare('
+            UPDATE tbl_activity_uploads 
+            SET is_checked = 1, checked_at = NOW() 
+            WHERE upload_id = ?
+        ');
+        $update->execute([$uploadId]);
+        
+        $_SESSION['flash_success'] = 'Submission marked as checked.';
+        redirect(base_url('admin/activities.php'));
     }
 }
 
@@ -163,6 +192,49 @@ $offset = ($page - 1) * $perPage;
 
 $activitiesStmt = $pdo->query($sql . ' LIMIT ' . (int)$perPage . ' OFFSET ' . (int)$offset);
 $activities = $activitiesStmt->fetchAll();
+
+// Get student submissions (activities with enrollment_id NOT NULL)
+$submissionsSql = '
+    SELECT 
+        au.*,
+        au.is_checked,
+        au.checked_at,
+        s.subject_id,
+        s.subject_code,
+        s.subject_name,
+        c.course_id,
+        c.course_code,
+        c.course_name,
+        u.full_name as student_name,
+        u.username as student_username
+    FROM tbl_activity_uploads au
+    INNER JOIN tbl_enrollments e ON e.enrollment_id = au.enrollment_id
+    INNER JOIN tbl_subjects s ON s.subject_id = e.subject_id
+    INNER JOIN tbl_course c ON c.course_id = s.course_id
+    INNER JOIN tbl_users u ON u.user_id = au.student_id
+    WHERE au.enrollment_id IS NOT NULL
+    AND au.student_id NOT IN (SELECT user_id FROM tbl_users WHERE role = "admin")
+    ORDER BY s.subject_code, au.uploaded_at DESC
+';
+
+$submissionsStmt = $pdo->query($submissionsSql);
+$allSubmissions = $submissionsStmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Group submissions by subject
+$submissionsBySubject = [];
+foreach ($allSubmissions as $submission) {
+    $subjectKey = $submission['subject_id'];
+    if (!isset($submissionsBySubject[$subjectKey])) {
+        $submissionsBySubject[$subjectKey] = [
+            'subject_code' => $submission['subject_code'],
+            'subject_name' => $submission['subject_name'],
+            'course_code' => $submission['course_code'],
+            'course_name' => $submission['course_name'],
+            'items' => []
+        ];
+    }
+    $submissionsBySubject[$subjectKey]['items'][] = $submission;
+}
 
 $pageTitle = 'Activity Management';
 $breadcrumb = [
@@ -343,6 +415,78 @@ ob_start();
     <?php endif; ?>
   </div>
 </div>
+
+<!-- Student Submissions Section -->
+<?php if (!empty($submissionsBySubject)): ?>
+<div class="card bg-base-100 shadow-md mb-6">
+  <div class="card-body">
+    <h3 class="card-title text-base mb-4">Student Submissions</h3>
+    <?php foreach ($submissionsBySubject as $subject): ?>
+        <div class="mb-6 last:mb-0">
+            <h4 class="font-semibold text-base mb-3">
+                <span><?= e($subject['subject_code']) ?></span>
+                <span class="text-sm font-normal text-base-content/70"><?= e($subject['subject_name']) ?></span>
+            </h4>
+            <p class="text-sm text-base-content/70 mb-3"><?= e($subject['course_code']) ?> – <?= e($subject['course_name']) ?></p>
+            
+            <div class="space-y-3">
+                <?php foreach ($subject['items'] as $submission): ?>
+                  <div class="border rounded p-4 bg-base-200/30">
+                    <div class="flex justify-between items-start gap-4">
+                      <div class="flex-1">
+                        <h5 class="font-semibold"><?= e($submission['file_name']) ?></h5>
+                        <p class="text-sm text-base-content/70 mt-1">
+                            <span class="badge badge-sm badge-primary"><?= e($submission['student_name'] ?: $submission['student_username']) ?></span>
+                        </p>
+                        <?php 
+                            $desc = $submission['description'];
+                            $desc = preg_replace('/^\[ActivityID:\d+\]\s*/', '', $desc);
+                            if ($desc): 
+                        ?>
+                            <p class="text-sm text-base-content/60 mt-1"><?= e($desc) ?></p>
+                        <?php endif; ?>
+                        <div class="text-xs text-base-content/60 mt-2">
+                          <span class="badge badge-sm badge-outline"><?= round($submission['file_size'] / 1024, 2) ?> KB</span>
+                          <span>Submitted: <?= e(date('M j, Y g:i A', strtotime($submission['uploaded_at']))) ?></span>
+                        </div>
+                      </div>
+                      <div class="flex flex-col gap-2 shrink-0">
+                        <a href="<?= base_url('download.php?id=' . $submission['upload_id']) ?>" class="btn btn-sm btn-primary gap-2">
+                          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                          </svg>
+                          Download
+                        </a>
+                        <?php if ($submission['is_checked']): ?>
+                          <span class="btn btn-sm btn-success gap-2 cursor-default opacity-80">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                            </svg>
+                            Checked
+                          </span>
+                        <?php else: ?>
+                          <form method="post" class="inline">
+                            <?= csrf_field() ?>
+                            <input type="hidden" name="action" value="check">
+                            <input type="hidden" name="upload_id" value="<?= (int)$submission['upload_id'] ?>">
+                            <button type="submit" class="btn btn-sm btn-outline btn-success gap-2 w-full">
+                              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                              </svg>
+                              Mark Checked
+                            </button>
+                          </form>
+                        <?php endif; ?>
+                      </div>
+                    </div>
+                  </div>
+                <?php endforeach; ?>
+            </div>
+        </div>
+    <?php endforeach; ?>
+  </div>
+</div>
+<?php endif; ?>
 
 <?php
 $content = ob_get_clean();

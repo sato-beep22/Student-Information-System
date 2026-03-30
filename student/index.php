@@ -5,25 +5,13 @@ requireStudent();
 $user = currentUser();
 $pdo = getDb();
 
+$flashSuccess = $_SESSION['flash_success'] ?? null;
+$flashError = $_SESSION['flash_error'] ?? null;
+unset($_SESSION['flash_success'], $_SESSION['flash_error']);
+
 // Create notifications table if it doesn't exist
-try {
-    $pdo->exec("
-        CREATE TABLE IF NOT EXISTS `tbl_notifications` (
-          `notification_id` INT(11) NOT NULL AUTO_INCREMENT,
-          `user_id` INT(11) NOT NULL,
-          `title` VARCHAR(255) NOT NULL,
-          `message` TEXT NOT NULL,
-          `type` ENUM('info', 'warning', 'danger', 'success') NOT NULL DEFAULT 'info',
-          `is_read` TINYINT(1) NOT NULL DEFAULT 0,
-          `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP(),
-          PRIMARY KEY (`notification_id`),
-          KEY `user_id` (`user_id`),
-          KEY `is_read` (`is_read`)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
-    ");
-} catch (Exception $e) {
-    // Table might already exist or other issue, continue anyway
-}
+require_once __DIR__ . '/../config/database.php';
+ensureNotificationsTable($pdo);
 
 $announcements = $pdo->query("
   SELECT a.post_id, a.title, a.content, a.created_at, u.full_name AS author_name
@@ -47,32 +35,29 @@ $enrollments = $pdo->prepare("
 $enrollments->execute([$user['user_id']]);
 $enrollments = $enrollments->fetchAll();
 
-// Get notifications for the student
+// Handle mark all as read
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'mark_read') {
+    if (csrf_verify()) {
+        try {
+            $pdo->prepare("UPDATE tbl_notifications SET is_read = 1 WHERE user_id = ?")->execute([$user['user_id']]);
+            $_SESSION['flash_success'] = 'Notifications cleared.';
+            redirect(base_url('student/index.php'));
+        } catch (Exception $e) {}
+    }
+}
+
+// Get unread notifications for the student
 $notifications = [];
 try {
     $notifStmt = $pdo->prepare("
       SELECT notification_id, title, message, type, is_read, created_at
       FROM tbl_notifications
-      WHERE user_id = ?
+      WHERE user_id = ? AND is_read = 0
       ORDER BY created_at DESC
       LIMIT 10
     ");
     $notifStmt->execute([$user['user_id']]);
     $notifications = $notifStmt->fetchAll();
-    
-    // Mark notifications as read
-    if (!empty($notifications)) {
-        $idList = [];
-        foreach ($notifications as $n) {
-            if (isset($n['notification_id'])) {
-                $idList[] = (int)$n['notification_id'];
-            }
-        }
-        if (!empty($idList)) {
-            $idString = implode(',', $idList);
-            $pdo->exec("UPDATE tbl_notifications SET is_read = 1 WHERE notification_id IN ($idString)");
-        }
-    }
 } catch (Exception $e) {
     // Notifications table might not exist, continue without notifications
 }
@@ -121,7 +106,16 @@ if (isset($_GET['logged_in']) && $_GET['logged_in'] === '1') {
   <!-- Notifications Card -->
   <div class="card bg-base-100 shadow">
     <div class="card-body">
-      <h2 class="card-title">Notifications</h2>
+      <div class="flex justify-between items-center mb-2">
+        <h2 class="card-title m-0">Notifications</h2>
+        <?php if (!empty($notifications)): ?>
+          <form method="post" class="m-0">
+            <?= csrf_field() ?>
+            <input type="hidden" name="action" value="mark_read">
+            <button type="submit" class="btn btn-xs btn-outline">Mark All as Read</button>
+          </form>
+        <?php endif; ?>
+      </div>
       <div class="space-y-3 max-h-96 overflow-y-auto">
         <?php if (!empty($notifications)): ?>
           <?php foreach ($notifications as $notif): ?>

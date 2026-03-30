@@ -288,6 +288,15 @@ ALTER TABLE `tbl_subjects`
 --
 ALTER TABLE `tbl_users`
   ADD CONSTRAINT `tbl_users_ibfk_1` FOREIGN KEY (`course_id`) REFERENCES `tbl_course` (`course_id`) ON DELETE SET NULL;
+--
+-- Migration: Add is_checked and checked_at to tbl_activity_uploads
+-- Run this if the columns do not exist yet:
+--
+-- ALTER TABLE `tbl_activity_uploads`
+--   ADD COLUMN IF NOT EXISTS `is_checked` TINYINT(1) NOT NULL DEFAULT 0,
+--   ADD COLUMN IF NOT EXISTS `checked_at` TIMESTAMP NULL DEFAULT NULL;
+--
+
 COMMIT;
 
 /*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;

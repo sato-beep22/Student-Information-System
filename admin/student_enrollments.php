@@ -1,45 +1,88 @@
 <?php
 require_once __DIR__ . '/../includes/auth.php';
+require_once __DIR__ . '/../includes/functions/academic.php';
+require_once __DIR__ . '/../includes/functions/attendance.php';
 requireAdmin();
-require_once dirname(__DIR__) . '/includes/functions/academic.php';
-require_once dirname(__DIR__) . '/includes/functions/attendance.php';
 
 $pdo = getDb();
+
 $flashSuccess = $_SESSION['flash_success'] ?? null;
 $flashError = $_SESSION['flash_error'] ?? null;
+unset($_SESSION['flash_success'], $_SESSION['flash_error']);
 
-// Create notifications table if it doesn't exist
-try {
-    $pdo->exec("
-        CREATE TABLE IF NOT EXISTS `tbl_notifications` (
-          `notification_id` INT(11) NOT NULL AUTO_INCREMENT,
-          `user_id` INT(11) NOT NULL,
-          `title` VARCHAR(255) NOT NULL,
-          `message` TEXT NOT NULL,
-          `type` ENUM('info', 'warning', 'danger', 'success') NOT NULL DEFAULT 'info',
-          `is_read` TINYINT(1) NOT NULL DEFAULT 0,
-          `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP(),
-          PRIMARY KEY (`notification_id`),
-          KEY `user_id` (`user_id`),
-          KEY `is_read` (`is_read`)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
-    ");
-} catch (Exception $e) {
-    // Table might already exist or other issue, continue anyway
-}
+// Ensure notifications table exists
+ensureNotificationsTable($pdo);
 
 // Determine target student
 $studentId = (int) ($_GET['student_id'] ?? ($_POST['student_id'] ?? 0));
 
 // If no specific student, show all enrollments list
 if (!$studentId) {
-    $perPage = 10;
-    $page = max(1, (int) ($_GET['page'] ?? 1));
-    $totalEnrollments = (int) $pdo->query('SELECT COUNT(*) FROM tbl_enrollments')->fetchColumn();
-    $totalPages = max(1, (int) ceil($totalEnrollments / $perPage));
-    $page = min($page, $totalPages);
-    $offset = ($page - 1) * $perPage;
+    // Get pagination params per course
+    $perPage = 5;
+    $coursePages = [];
+    foreach ($_GET as $key => $value) {
+        if (strpos($key, 'page_') === 0) {
+            $cid = (int) substr($key, 5);
+            $coursePages[$cid] = max(1, (int) $value);
+        }
+    }
     
+    // Get all courses for grouping
+    $coursesStmt = $pdo->query('SELECT course_id, course_code, course_name FROM tbl_course ORDER BY course_code');
+    $courses = $coursesStmt->fetchAll();
+    
+    // Get all students with their enrollment info grouped by course
+    $studentsByCourse = [];
+    $totalStudentsByCourse = [];
+    foreach ($courses as $course) {
+        $courseId = $course['course_id'];
+        
+        // Get total count of students in this course
+        $countStmt = $pdo->prepare('SELECT COUNT(*) FROM tbl_users WHERE role = "student" AND course_id = ?');
+        $countStmt->execute([$courseId]);
+        $totalCount = (int) $countStmt->fetchColumn();
+        $totalStudentsByCourse[$courseId] = $totalCount;
+        
+        // Calculate pagination
+        $currentPage = $coursePages[$courseId] ?? 1;
+        $totalPages = max(1, (int) ceil($totalCount / $perPage));
+        $currentPage = min($currentPage, $totalPages);
+        $offset = ($currentPage - 1) * $perPage;
+        
+        // Get students enrolled in this course with pagination
+        $studentsSql = "
+            SELECT 
+                u.user_id,
+                u.full_name,
+                u.email,
+                u.username,
+                COUNT(e.enrollment_id) as subject_count,
+                SUM(CASE WHEN e.enrollment_status = 'active' THEN 1 ELSE 0 END) as active_count,
+                SUM(CASE WHEN e.enrollment_status = 'dropped' THEN 1 ELSE 0 END) as dropped_count
+            FROM tbl_users u
+            LEFT JOIN tbl_enrollments e ON e.student_id = u.user_id
+            WHERE u.role = 'student' AND u.course_id = ?
+            GROUP BY u.user_id, u.full_name, u.email, u.username
+            ORDER BY u.full_name
+            LIMIT " . (int) $perPage . " OFFSET " . (int) $offset;
+        $studentsStmt = $pdo->prepare($studentsSql);
+        $studentsStmt->execute([$courseId]);
+        $courseStudents = $studentsStmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        if (!empty($courseStudents) || $totalCount > 0) {
+            $studentsByCourse[$courseId] = [
+                'course_code' => $course['course_code'],
+                'course_name' => $course['course_name'],
+                'students' => $courseStudents,
+                'total_count' => $totalCount,
+                'current_page' => $currentPage,
+                'total_pages' => $totalPages
+            ];
+        }
+    }
+    
+    // Get all student-subject enrollments for modal display
     $allEnrollmentsStmt = $pdo->query('
         SELECT 
             e.enrollment_id,
@@ -47,20 +90,40 @@ if (!$studentId) {
             e.status,
             e.enrollment_status,
             e.grade,
+            e.enrollment_date,
             u.full_name as student_name,
             u.email,
             s.subject_code,
             s.subject_name,
+            s.subject_id,
             c.course_code,
-            e.enrollment_date
+            c.course_id
         FROM tbl_enrollments e
         JOIN tbl_users u ON u.user_id = e.student_id
         JOIN tbl_subjects s ON s.subject_id = e.subject_id
         JOIN tbl_course c ON c.course_id = s.course_id
-        ORDER BY e.enrollment_date DESC
-        LIMIT ' . (int) $perPage . ' OFFSET ' . (int) $offset
-    );
+        ORDER BY u.full_name, s.subject_code
+    ');
     $allEnrollments = $allEnrollmentsStmt->fetchAll();
+    
+    // Group enrollments by student for modal
+    $enrollmentsByStudent = [];
+    foreach ($studentsByCourse as $courseId => $courseData) {
+        foreach ($courseData['students'] as $student) {
+            $enrollmentsByStudent[$student['user_id']] = [
+                'student_name' => $student['full_name'],
+                'email' => $student['email'],
+                'items' => []
+            ];
+        }
+    }
+    
+    foreach ($allEnrollments as $e) {
+        $studentIdKey = $e['student_id'];
+        if (isset($enrollmentsByStudent[$studentIdKey])) {
+            $enrollmentsByStudent[$studentIdKey]['items'][] = $e;
+        }
+    }
     
     $pageTitle = 'All Enrollments';
     $breadcrumb = [
@@ -79,59 +142,164 @@ if (!$studentId) {
       ['label' => 'Announcements', 'url' => base_url('admin/announcements.php')],
     ];
     
+    // Generate modal HTML for each student
+    $modalsHtml = '';
+    foreach ($enrollmentsByStudent as $sid => $studentData) {
+        $modalsHtml .= '
+        <dialog id="enrollment_modal_' . (int)$sid . '" class="modal">
+          <div class="modal-box w-11/12 max-w-4xl">
+            <h3 class="font-bold text-lg mb-4">
+                ' . e($studentData['student_name']) . '
+                <span class="text-sm font-normal text-base-content/70"> - ' . e($studentData['email']) . '</span>
+            </h3>';
+            
+        if (empty($studentData['items'])) {
+            $modalsHtml .= '
+            <div class="alert alert-info">
+                <svg class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                </svg>
+                <span>No enrolled subjects for this student.</span>
+            </div>';
+        } else {
+            $modalsHtml .= '
+            <div class="overflow-x-auto">
+                <table class="table table-zebra">
+                    <thead>
+                        <tr>
+                            <th>Subject</th>
+                            <th>Course</th>
+                            <th>Grade</th>
+                            <th>Status</th>
+                            <th>Enrollment Date</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>';
+            
+            foreach ($studentData['items'] as $enroll) {
+                $statusClass = $enroll['enrollment_status'] === 'active' ? 'success' : ($enroll['enrollment_status'] === 'dropped' ? 'error' : 'warning');
+                $modalsHtml .= '
+                            <tr>
+                                <td>
+                                    <div><strong>' . e($enroll['subject_code']) . '</strong></div>
+                                    <div class="text-sm text-base-content/70">' . e($enroll['subject_name']) . '</div>
+                                </td>
+                                <td>' . e($enroll['course_code']) . '</td>
+                                <td>' . ($enroll['grade'] !== null ? e($enroll['grade']) : '--') . '</td>
+                                <td>
+                                    <span class="badge badge-' . $statusClass . '">' . e(ucfirst($enroll['enrollment_status'] ?? 'active')) . '</span>
+                                </td>
+                                <td>' . e(date('M j, Y', strtotime($enroll['enrollment_date']))) . '</td>
+                                <td>
+                                    <a href="?student_id=' . (int)$enroll['student_id'] . '" class="btn btn-sm btn-ghost">Manage</a>
+                                </td>
+                            </tr>';
+            }
+            
+            $modalsHtml .= '
+                        </tbody>
+                    </table>
+                </div>';
+        }
+        
+        $modalsHtml .= '
+            <div class="modal-action">
+                <button class="btn" onclick="document.getElementById(\'enrollment_modal_' . (int)$sid . '\').close()">Close</button>
+            </div>
+          </div>
+          <form method="dialog" class="modal-backdrop">
+            <button>close</button>
+          </form>
+        </dialog>';
+    }
+    
     ob_start();
     ?>
-    <h2 class="text-xl font-semibold mb-4">Student Enrollments</h2>
-    <div class="overflow-x-auto card bg-base-100 shadow-md">
-      <table class="table table-zebra">
-        <thead>
-          <tr>
-            <th>Student</th>
-            <th>Subject</th>
-            <th>Course</th>
-            <th>Grade</th>
-            <th>Status</th>
-            <th>Enrolled Date</th>
-            <th>Action</th>
-          </tr>
-        </thead>
-        <tbody>
-          <?php foreach ($allEnrollments as $e): ?>
-            <tr>
-              <td>
-                <div><strong><?= e($e['student_name']) ?></strong></div>
-                <div class="text-sm text-base-content/70"><?= e($e['email']) ?></div>
-              </td>
-              <td>
-                <div><strong><?= e($e['subject_code']) ?></strong></div>
-                <div class="text-sm text-base-content/70"><?= e($e['subject_name']) ?></div>
-              </td>
-              <td><?= e($e['course_code']) ?></td>
-              <td><?= $e['grade'] !== null ? e($e['grade']) : '--' ?></td>
-              <td>
-                <span class="badge badge-<?= $e['status'] === 'enrolled' ? 'success' : 'warning' ?>">
-                  <?= e(ucfirst($e['status'])) ?>
-                </span>
-              </td>
-              <td><?= e(date('M j, Y', strtotime($e['enrollment_date']))) ?></td>
-              <td>
-                <a href="?student_id=<?= (int)$e['student_id'] ?>" class="btn btn-sm btn-ghost">Manage</a>
-              </td>
-            </tr>
-          <?php endforeach; ?>
-        </tbody>
-      </table>
+    <h2 class="text-xl font-semibold mb-4">Student Enrollments by Course</h2>
+    
+    <?php foreach ($studentsByCourse as $courseId => $courseData): ?>
+    <div class="card bg-base-100 shadow-md mb-6">
+        <div class="card-body">
+            <h3 class="card-title text-base mb-4">
+                <?= e($courseData['course_code']) ?> - <?= e($courseData['course_name']) ?>
+                <span class="badge badge-primary badge-sm"><?= $courseData['total_count'] ?> Students</span>
+            </h3>
+            
+            <div class="overflow-x-auto">
+                <table class="table table-zebra">
+                    <thead>
+                        <tr>
+                            <th>Student</th>
+                            <th>Subjects Enrolled</th>
+                            <th>Active</th>
+                            <th>Dropped</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($courseData['students'] as $student): ?>
+                        <tr>
+                            <td>
+                                <div><strong><?= e($student['full_name']) ?></strong></div>
+                                <div class="text-sm text-base-content/70"><?= e($student['email']) ?></div>
+                            </td>
+                            <td>
+                                <span class="badge badge-outline"><?= (int)$student['subject_count'] ?> total</span>
+                            </td>
+                            <td>
+                                <span class="badge badge-success"><?= (int)$student['active_count'] ?></span>
+                            </td>
+                            <td>
+                                <?php if ((int)$student['dropped_count'] > 0): ?>
+                                    <span class="badge badge-error"><?= (int)$student['dropped_count'] ?></span>
+                                <?php else: ?>
+                                    <span class="text-base-content/50">0</span>
+                                <?php endif; ?>
+                            </td>
+                            <td>
+                                <button class="btn btn-sm btn-primary" onclick="document.getElementById('enrollment_modal_<?= (int)$student['user_id'] ?>').showModal()">View Subjects</button>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+            
+            <?php if ($courseData['total_pages'] > 1): ?>
+            <div class="flex justify-center gap-2 mt-4">
+                <?php if ($courseData['current_page'] > 1): ?>
+                    <a href="?page_<?= (int)$courseId ?>=<?= $courseData['current_page'] - 1 ?>" class="btn btn-sm">«</a>
+                <?php endif; ?>
+                
+                <?php for ($i = 1; $i <= $courseData['total_pages']; $i++): ?>
+                    <a href="?page_<?= (int)$courseId ?>=<?= $i ?>" class="btn btn-sm <?= $i === $courseData['current_page'] ? 'btn-active' : '' ?>">
+                        <?= $i ?>
+                    </a>
+                <?php endfor; ?>
+                
+                <?php if ($courseData['current_page'] < $courseData['total_pages']): ?>
+                    <a href="?page_<?= (int)$courseId ?>=<?= $courseData['current_page'] + 1 ?>" class="btn btn-sm">»</a>
+                <?php endif; ?>
+            </div>
+            <?php endif; ?>
+        </div>
     </div>
-    <?php
-    $pagination_current_page = $page;
-    $pagination_total_pages = $totalPages;
-    $pagination_base_path = 'admin/student_enrollments.php';
-    $pagination_total = $totalEnrollments;
-    $pagination_per_page = $perPage;
-    require_once __DIR__ . '/../includes/pagination.php';
-    ?>
+    <?php endforeach; ?>
+    
+    <?php if (empty($studentsByCourse)): ?>
+    <div class="alert alert-info">
+        <svg class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+        </svg>
+        <span>No student enrollments found.</span>
+    </div>
+    <?php endif; ?>
+    
     <?php
     $content = ob_get_clean();
+    // Prepend modals to content
+    $content = $modalsHtml . $content;
     require_once __DIR__ . '/../includes/layout_drawer.php';
     exit;
 }
@@ -171,19 +339,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && csrf_verify()) {
                 $_SESSION['flash_error'] = 'You can only enroll the student in subjects for their course.';
             } else {
                 // Check if already enrolled
-                $exists = $pdo->prepare('SELECT 1 FROM tbl_enrollments WHERE student_id = ? AND subject_id = ?');
-                $exists->execute([$student['user_id'], $subjectId]);
-                if ($exists->fetch()) {
+                if (!enrollStudentInSubject($student['user_id'], $subjectId, 'enrolled')) {
                     $_SESSION['flash_error'] = 'Student is already enrolled in this subject.';
                 } else {
-                    try {
-                        $ins = $pdo->prepare('INSERT INTO tbl_enrollments (student_id, subject_id, status) VALUES (?, ?, ?)');
-                        $ins->execute([$student['user_id'], $subjectId, 'enrolled']);
-                    } catch (Throwable $e) {
-                        // Fallback for databases without status column
-                        $ins = $pdo->prepare('INSERT INTO tbl_enrollments (student_id, subject_id) VALUES (?, ?)');
-                        $ins->execute([$student['user_id'], $subjectId]);
-                    }
                     $_SESSION['flash_success'] = 'Student enrolled successfully.';
                 }
             }
@@ -206,29 +364,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && csrf_verify()) {
             $enrollmentDetails = $enrollDetailsStmt->fetch();
             
             // Update the enrollment status to 'dropped' instead of deleting
-            $update = $pdo->prepare('UPDATE tbl_enrollments SET enrollment_status = ? WHERE enrollment_id = ? AND student_id = ?');
-            $update->execute(['dropped', $enrollmentId, $student['user_id']]);
-            
             // Send notification to the student
             if ($enrollmentDetails) {
                 $notificationTitle = 'Subject Dropped by Admin';
                 $notificationMessage = "You have been dropped from {$enrollmentDetails['subject_code']} - {$enrollmentDetails['subject_name']} by the administrator.";
                 $notificationType = 'warning';
                 
-                // Insert notification
-                try {
-                    $notifStmt = $pdo->prepare('
-                        INSERT INTO tbl_notifications (user_id, title, message, type, created_at)
-                        VALUES (?, ?, ?, ?, NOW())
-                    ');
-                    $notifStmt->execute([$student['user_id'], $notificationTitle, $notificationMessage, $notificationType]);
-                } catch (Exception $e) {
-                    // Log error for debugging
-                    error_log("Notification error: " . $e->getMessage());
-                }
+                updateEnrollmentWithNotification($enrollmentId, $student['user_id'], 'dropped', $notificationTitle, $notificationMessage, $notificationType);
+            } else {
+                $update = $pdo->prepare('UPDATE tbl_enrollments SET enrollment_status = ?, academic_status = ? WHERE enrollment_id = ? AND student_id = ?');
+                $update->execute(['dropped', 'dropped', $enrollmentId, $student['user_id']]);
             }
             
-            $_SESSION['flash_success'] = 'Enrollment dropped. Student has been notified.';
+            $_SESSION['flash_error'] = 'Enrollment dropped. Student has been notified.';
         }
         redirect(base_url('admin/student_enrollments.php?student_id=' . (int) $student['user_id']));
     }
@@ -248,26 +396,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && csrf_verify()) {
             $enrollmentDetails = $enrollDetailsStmt->fetch();
             
             // Update the enrollment status back to 'active'
-            $update = $pdo->prepare('UPDATE tbl_enrollments SET enrollment_status = ? WHERE enrollment_id = ? AND student_id = ?');
-            $update->execute(['active', $enrollmentId, $student['user_id']]);
-            
             // Send notification to the student
             if ($enrollmentDetails) {
                 $notificationTitle = 'Subject Re-enrolled by Admin';
                 $notificationMessage = "You have been re-enrolled in {$enrollmentDetails['subject_code']} - {$enrollmentDetails['subject_name']} by the administrator.";
                 $notificationType = 'success';
                 
-                // Insert notification
-                try {
-                    $notifStmt = $pdo->prepare('
-                        INSERT INTO tbl_notifications (user_id, title, message, type, created_at)
-                        VALUES (?, ?, ?, ?, NOW())
-                    ');
-                    $notifStmt->execute([$student['user_id'], $notificationTitle, $notificationMessage, $notificationType]);
-                } catch (Exception $e) {
-                    // Log error for debugging
-                    error_log("Notification error: " . $e->getMessage());
-                }
+                updateEnrollmentWithNotification($enrollmentId, $student['user_id'], 'active', $notificationTitle, $notificationMessage, $notificationType);
+            } else {
+                $update = $pdo->prepare('UPDATE tbl_enrollments SET enrollment_status = ? WHERE enrollment_id = ? AND student_id = ?');
+                $update->execute(['active', $enrollmentId, $student['user_id']]);
             }
             
             $_SESSION['flash_success'] = 'Student re-enrolled successfully. Student has been notified.';
@@ -297,17 +435,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && csrf_verify()) {
         $sectionId = (int) ($_POST['section_id'] ?? 0);
         if ($sectionId > 0) {
             // Check capacity before assigning, excluding the current student from the count
-            $capStmt = $pdo->prepare('
-                SELECT s.capacity, COUNT(u.user_id) as student_count
-                FROM tbl_sections s
-                LEFT JOIN tbl_users u ON u.section_id = s.section_id AND u.role = "student" AND u.user_id != ?
-                WHERE s.section_id = ?
-                GROUP BY s.section_id
-            ');
-            $capStmt->execute([$student['user_id'], $sectionId]);
-            $section = $capStmt->fetch();
+            $capacityInfo = getSectionCapacityInfo($sectionId, $student['user_id']);
 
-            if ($section && (int)($section['student_count'] ?? 0) >= (int)($section['capacity'] ?? 0)) {
+            if ($capacityInfo['is_full']) {
                 $_SESSION['flash_error'] = 'Cannot assign section. The selected section is at full capacity.';
             } else {
                 $stmt = $pdo->prepare('UPDATE tbl_users SET section_id = ? WHERE user_id = ?');
@@ -484,8 +614,11 @@ ob_start();
                   </form>
                 </td>
                 <td>
-                  <?php $acadStatus = $e['academic_status'] ?? 'pending'; ?>
-                  <span class="badge badge-<?= $acadStatus === 'passed' ? 'success' : ($acadStatus === 'failed' ? 'error' : 'warning') ?>">
+                  <?php 
+                    $enrollStatus = $e['enrollment_status'] ?? 'active';
+                    $acadStatus = ($enrollStatus === 'dropped') ? 'dropped' : ($e['academic_status'] ?? 'pending');
+                  ?>
+                  <span class="badge badge-<?= $acadStatus === 'passed' ? 'success' : ($acadStatus === 'failed' ? 'error' : ($acadStatus === 'dropped' ? 'error' : 'warning')) ?>">
                     <?= e(ucfirst($acadStatus)) ?>
                   </span>
                 </td>

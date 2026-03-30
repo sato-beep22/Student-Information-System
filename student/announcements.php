@@ -3,6 +3,11 @@ require_once __DIR__ . '/../includes/auth.php';
 requireStudent();
 
 $pdo = getDb();
+
+$flashSuccess = $_SESSION['flash_success'] ?? null;
+$flashError = $_SESSION['flash_error'] ?? null;
+unset($_SESSION['flash_success'], $_SESSION['flash_error']);
+
 $perPage = 5;
 $page = max(1, (int) ($_GET['page'] ?? 1));
 $totalAnnouncements = (int) $pdo->query("SELECT COUNT(*) FROM tbl_announcements")->fetchColumn();

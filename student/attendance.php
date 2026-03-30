@@ -6,6 +6,10 @@ requireStudent();
 $user = currentUser();
 $pdo = getDb();
 
+$flashSuccess = $_SESSION['flash_success'] ?? null;
+$flashError = $_SESSION['flash_error'] ?? null;
+unset($_SESSION['flash_success'], $_SESSION['flash_error']);
+
 // Get month and year from query params or use current
 $year = (int) ($_GET['year'] ?? date('Y'));
 $month = (int) ($_GET['month'] ?? date('m'));

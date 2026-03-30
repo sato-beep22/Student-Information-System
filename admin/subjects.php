@@ -4,6 +4,8 @@ requireAdmin();
 
 $pdo = getDb();
 
+$flashSuccess = $_SESSION['flash_success'] ?? null;
+$flashError = $_SESSION['flash_error'] ?? null;
 unset($_SESSION['flash_success'], $_SESSION['flash_error']);
 
 $courses = $pdo->query('SELECT course_id, course_name, course_code FROM tbl_course ORDER BY course_name')->fetchAll();

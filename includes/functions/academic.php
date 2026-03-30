@@ -322,6 +322,99 @@ function getEnrollmentDetails(int $enrollmentId): ?array {
 }
 
 /**
+ * Check if a section has available capacity
+ * @param int $sectionId The section ID
+ * @param int $excludeStudentId Optional student ID to exclude from count
+ * @return array ['is_full' => boolean, 'capacity' => int, 'current_count' => int]
+ */
+function getSectionCapacityInfo(int $sectionId, int $excludeStudentId = 0): array {
+    $pdo = getDb();
+    
+    $query = '
+        SELECT s.capacity, COUNT(u.user_id) as student_count
+        FROM tbl_sections s
+        LEFT JOIN tbl_users u ON u.section_id = s.section_id AND u.role = "student"';
+        
+    $params = [];
+    if ($excludeStudentId > 0) {
+        $query .= ' AND u.user_id != ?';
+        $params[] = $excludeStudentId;
+    }
+    
+    $query .= ' WHERE s.section_id = ? GROUP BY s.section_id';
+    $params[] = $sectionId;
+
+    $stmt = $pdo->prepare($query);
+    $stmt->execute($params);
+    $section = $stmt->fetch();
+
+    $capacity = (int)($section['capacity'] ?? 0);
+    $currentCount = (int)($section['student_count'] ?? 0);
+    
+    return [
+        'is_full' => $section && $currentCount >= $capacity,
+        'capacity' => $capacity,
+        'current_count' => $currentCount
+    ];
+}
+
+/**
+ * Enroll a student in a subject securely (handles try-catch for status column)
+ */
+function enrollStudentInSubject(int $studentId, int $subjectId, string $status = 'enrolled'): bool {
+    $pdo = getDb();
+    
+    $exists = $pdo->prepare('SELECT 1 FROM tbl_enrollments WHERE student_id = ? AND subject_id = ?');
+    $exists->execute([$studentId, $subjectId]);
+    if ($exists->fetch()) {
+        return false;
+    }
+    
+    try {
+        $ins = $pdo->prepare('INSERT INTO tbl_enrollments (student_id, subject_id, status) VALUES (?, ?, ?)');
+        $ins->execute([$studentId, $subjectId, $status]);
+        return true;
+    } catch (Throwable $e) {
+        // Fallback for databases without status column
+        $ins = $pdo->prepare('INSERT INTO tbl_enrollments (student_id, subject_id) VALUES (?, ?)');
+        $ins->execute([$studentId, $subjectId]);
+        return true;
+    }
+}
+
+/**
+ * Update an enrollment status and automatically send a notification to the student
+ */
+function updateEnrollmentWithNotification(int $enrollmentId, int $studentId, string $status, string $notifTitle, string $notifMessage, string $notifType = 'info'): bool {
+    $pdo = getDb();
+    
+    // Update the enrollment status, and if it's dropped, also sync the academic status
+    if ($status === 'dropped') {
+        $update = $pdo->prepare('UPDATE tbl_enrollments SET enrollment_status = ?, academic_status = ? WHERE enrollment_id = ? AND student_id = ?');
+        $success = $update->execute([$status, 'dropped', $enrollmentId, $studentId]);
+    } else {
+        $update = $pdo->prepare('UPDATE tbl_enrollments SET enrollment_status = ? WHERE enrollment_id = ? AND student_id = ?');
+        $success = $update->execute([$status, $enrollmentId, $studentId]);
+    }
+    
+    if ($success) {
+        // Prepare notification creation
+        ensureNotificationsTable($pdo);
+        try {
+            $notifStmt = $pdo->prepare('
+                INSERT INTO tbl_notifications (user_id, title, message, type, created_at)
+                VALUES (?, ?, ?, ?, NOW())
+            ');
+            $notifStmt->execute([$studentId, $notifTitle, $notifMessage, $notifType]);
+        } catch (Exception $e) {
+            error_log("Notification error: " . $e->getMessage());
+        }
+    }
+    
+    return $success;
+}
+
+/**
  * Update grade for an enrollment
  */
 function updateGrade(int $enrollmentId, float $grade): bool {

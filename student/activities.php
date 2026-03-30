@@ -101,6 +101,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && csrf_verify()) {
                 VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
             ');
             
+            $finalDescription = '[ActivityID:' . $adminActivity['upload_id'] . '] ' . ($description ?: 'Submission for: ' . preg_replace('/^\[\d+\]\s+/', '', $adminActivity['file_name']));
+            
             $insert->execute([
                 $enrollment['enrollment_id'],
                 $user['user_id'],
@@ -108,7 +110,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && csrf_verify()) {
                 'uploads/activities/' . $newFilename,
                 $_FILES['submission_file']['type'],
                 $_FILES['submission_file']['size'],
-                $description ?: 'Submission for: ' . $adminActivity['file_name']
+                $finalDescription
             ]);
             
             $_SESSION['flash_success'] = 'Activity submitted successfully!';
@@ -116,6 +118,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && csrf_verify()) {
             $_SESSION['flash_error'] = 'Failed to save submission.';
         }
         
+        redirect(base_url('student/activities.php'));
+    } elseif ($action === 'undo') {
+        $uploadId = (int) ($_POST['upload_id'] ?? 0);
+        if ($uploadId) {
+            // Find and delete the submission
+            $stmt = $pdo->prepare('SELECT file_path FROM tbl_activity_uploads WHERE upload_id = ? AND student_id = ? AND enrollment_id IS NOT NULL');
+            $stmt->execute([$uploadId, $user['user_id']]);
+            $sub = $stmt->fetch();
+            if ($sub) {
+                $filePath = dirname(__DIR__) . '/' . $sub['file_path'];
+                if (file_exists($filePath)) {
+                    unlink($filePath);
+                }
+                $pdo->prepare('DELETE FROM tbl_activity_uploads WHERE upload_id = ?')->execute([$uploadId]);
+                $_SESSION['flash_success'] = 'Submission undone successfully.';
+            } else {
+                $_SESSION['flash_error'] = 'Submission not found or permission denied.';
+            }
+        }
         redirect(base_url('student/activities.php'));
     }
 }
@@ -163,6 +184,8 @@ $submissionsStmt = $pdo->prepare('
         au.file_size,
         au.description,
         au.uploaded_at,
+        au.is_checked,
+        au.checked_at,
         s.subject_id,
         s.subject_code,
         s.subject_name,
@@ -197,7 +220,12 @@ foreach ($activities as $activity) {
 
 // Group submissions by subject
 $submissionsBySubject = [];
+$submittedActivityIds = [];
 foreach ($submissions as $submission) {
+    if (preg_match('/^\[ActivityID:(\d+)\]/', $submission['description'], $matches)) {
+        $submittedActivityIds[$matches[1]] = true;
+    }
+    
     $subjectKey = $submission['subject_id'];
     if (!isset($submissionsBySubject[$subjectKey])) {
         $submissionsBySubject[$subjectKey] = [
@@ -231,25 +259,6 @@ ob_start();
 ?>
 
 <h2 class="text-xl font-semibold mb-6">Activities</h2>
-
-<!-- Flash Messages -->
-<?php if ($flashSuccess): ?>
-<div class="alert alert-success mb-4">
-    <svg class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-    </svg>
-    <span><?= e($flashSuccess) ?></span>
-</div>
-<?php endif; ?>
-
-<?php if ($flashError): ?>
-<div class="alert alert-error mb-4">
-    <svg class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-    </svg>
-    <span><?= e($flashError) ?></span>
-</div>
-<?php endif; ?>
 
 <?php if (empty($activitiesBySubject)): ?>
     <div class="alert alert-info">
@@ -295,12 +304,21 @@ ob_start();
                                         </svg>
                                         Download
                                     </a>
-                                    <label for="modal-submit-<?= (int)$activity['upload_id'] ?>" class="btn btn-sm btn-success gap-2">
-                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
-                                        </svg>
-                                        Submit
-                                    </label>
+                                    <?php if (isset($submittedActivityIds[$activity['upload_id']])): ?>
+                                        <button disabled class="btn btn-sm btn-success gap-2 opacity-50 cursor-not-allowed">
+                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                                            </svg>
+                                            Submitted
+                                        </button>
+                                    <?php else: ?>
+                                        <label for="modal-submit-<?= (int)$activity['upload_id'] ?>" class="btn btn-sm btn-success gap-2">
+                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                                            </svg>
+                                            Submit
+                                        </label>
+                                    <?php endif; ?>
                                 </div>
                             </div>
                         </div>
@@ -365,27 +383,54 @@ ob_start();
                             <div class="flex justify-between items-start gap-4">
                                 <div class="flex-1 min-w-0">
                                     <h4 class="font-semibold break-words"><?= e($submission['file_name']) ?></h4>
-                                    <?php if ($submission['description']): ?>
-                                        <p class="text-sm text-base-content/70 mt-2"><?= e($submission['description']) ?></p>
+                                    <?php 
+                                        $desc = $submission['description'];
+                                        $desc = preg_replace('/^\[ActivityID:\d+\]\s*/', '', $desc);
+                                        if ($desc): 
+                                    ?>
+                                        <p class="text-sm text-base-content/70 mt-2"><?= e($desc) ?></p>
                                     <?php endif; ?>
                                     <div class="flex gap-3 text-xs text-base-content/60 mt-3 flex-wrap">
-                                        <span class="badge badge-sm badge-success">
-                                            Submitted
-                                        </span>
+                                        <?php if ($submission['is_checked']): ?>
+                                            <span class="badge badge-sm badge-success gap-1">
+                                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+                                                Checked
+                                            </span>
+                                        <?php else: ?>
+                                            <span class="badge badge-sm badge-ghost">Pending review</span>
+                                        <?php endif; ?>
                                         <span class="badge badge-sm badge-outline">
                                             <?= round($submission['file_size'] / 1024, 2) ?> KB
                                         </span>
                                         <span>
                                             Submitted: <?= e(date('M j, Y g:i A', strtotime($submission['uploaded_at']))) ?>
                                         </span>
+                                        <?php if ($submission['is_checked'] && $submission['checked_at']): ?>
+                                            <span class="text-success">
+                                                Checked: <?= e(date('M j, Y g:i A', strtotime($submission['checked_at']))) ?>
+                                            </span>
+                                        <?php endif; ?>
                                     </div>
                                 </div>
-                                <a href="<?= base_url('download.php?id=' . $submission['upload_id']) ?>" class="btn btn-sm btn-primary gap-2">
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
-                                    </svg>
-                                    Download
-                                </a>
+                                <div class="flex flex-col gap-2">
+                                    <a href="<?= base_url('download.php?id=' . $submission['upload_id']) ?>" class="btn btn-sm btn-primary gap-2">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                                        </svg>
+                                        Download
+                                    </a>
+                                    <form method="post" onsubmit="return confirm('Are you sure you want to undo this submission?');" class="inline">
+                                        <?= csrf_field() ?>
+                                        <input type="hidden" name="action" value="undo">
+                                        <input type="hidden" name="upload_id" value="<?= (int)$submission['upload_id'] ?>">
+                                        <button type="submit" class="btn btn-sm btn-error gap-2 w-full">
+                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"></path>
+                                            </svg>
+                                            Undo
+                                        </button>
+                                    </form>
+                                </div>
                             </div>
                         </div>
                     <?php endforeach; ?>

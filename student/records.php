@@ -5,6 +5,10 @@ requireStudent();
 $user = currentUser();
 $pdo = getDb();
 
+$flashSuccess = $_SESSION['flash_success'] ?? null;
+$flashError = $_SESSION['flash_error'] ?? null;
+unset($_SESSION['flash_success'], $_SESSION['flash_error']);
+
 $perPage = 5;
 $page = max(1, (int) ($_GET['page'] ?? 1));
 $stmtCount = $pdo->prepare("SELECT COUNT(*) FROM tbl_enrollments e WHERE e.student_id = ? AND e.status IN ('enrolled', 'dropped')");
@@ -60,8 +64,8 @@ ob_start();
       </thead>
       <tbody>
         <?php foreach ($enrollments as $e): 
-          $acadStatus = $e['academic_status'] ?? 'pending';
           $enrollStatus = $e['enrollment_status'] ?? 'active';
+          $acadStatus = ($enrollStatus === 'dropped') ? 'dropped' : ($e['academic_status'] ?? 'pending');
         ?>
           <tr>
             <td><?= e($e['course_code']) ?> – <?= e($e['course_name']) ?></td>
@@ -70,7 +74,7 @@ ob_start();
               <div class="text-sm text-base-content/70"><?= e($e['subject_name']) ?></div>
             </td>
             <td><?= $e['grade'] !== null ? e($e['grade']) : '<span class="text-base-content/50">--</span>' ?></td>
-            <td><span class="badge badge-<?= $acadStatus === 'passed' ? 'success' : ($acadStatus === 'failed' ? 'error' : 'warning') ?>"><?= e(ucfirst($acadStatus)) ?></span></td>
+            <td><span class="badge badge-<?= $acadStatus === 'passed' ? 'success' : ($acadStatus === 'failed' ? 'error' : ($acadStatus === 'dropped' ? 'error' : 'warning')) ?>"><?= e(ucfirst($acadStatus)) ?></span></td>
             <td><span class="badge badge-<?= $enrollStatus === 'active' ? 'success' : ($enrollStatus === 'warning' ? 'warning' : 'error') ?>"><?= e(ucfirst($enrollStatus)) ?></span></td>
             <td><?= e(date('M j, Y', strtotime($e['enrollment_date']))) ?></td>
           </tr>

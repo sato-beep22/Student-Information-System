@@ -20,18 +20,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && csrf_verify()) {
         if (!$subRow || (int)$subRow['course_id'] !== $studentCourseId) {
             $_SESSION['flash_error'] = 'You can only enroll in subjects for your course.';
         } else {
-            $exists = $pdo->prepare('SELECT 1 FROM tbl_enrollments WHERE student_id = ? AND subject_id = ?');
-            $exists->execute([$user['user_id'], $subject_id]);
-            if ($exists->fetch()) {
-                $_SESSION['flash_error'] = 'You are Dropped From this Subject.';
+            require_once __DIR__ . '/../includes/functions/academic.php';
+            if (!enrollStudentInSubject($user['user_id'], $subject_id, 'pending')) {
+                $_SESSION['flash_error'] = 'You are already enrolled or pending for this subject.';
             } else {
-                try {
-                    $pdo->prepare('INSERT INTO tbl_enrollments (student_id, subject_id, status) VALUES (?, ?, ?)')
-                        ->execute([$user['user_id'], $subject_id, 'pending']);
-                } catch (Throwable $e) {
-                    $pdo->prepare('INSERT INTO tbl_enrollments (student_id, subject_id) VALUES (?, ?)')
-                        ->execute([$user['user_id'], $subject_id]);
-                }
                 $_SESSION['flash_success'] = 'Enrollment request submitted. Awaiting admin approval.';
             }
         }
@@ -131,14 +123,12 @@ ob_start();
             <div class="text-sm text-base-content/70"><?= e($s['subject_name']) ?></div>
           </td>
           <td>
-            <?php if ($isEnrolled): ?>
-              <?php if ($enrollStatus === 'dropped'): ?>
-                <span class="badge badge-error">Dropped</span>
-              <?php elseif ($enrollStatus === 'pending'): ?>
-                <span class="badge badge-warning">Pending</span>
-              <?php else: ?>
-                <span class="badge badge-success">Enrolled</span>
-              <?php endif; ?>
+            <?php if ($enrollStatus === 'dropped'): ?>
+              <button type="button" class="btn btn-error btn-sm cursor-not-allowed pointer-events-none">Dropped</button>
+            <?php elseif ($enrollStatus === 'pending'): ?>
+              <span class="badge badge-warning">Pending</span>
+            <?php elseif ($isEnrolled): ?>
+              <span class="badge badge-success">Enrolled</span>
             <?php else: ?>
               <form method="post" class="inline">
                 <?= csrf_field() ?>

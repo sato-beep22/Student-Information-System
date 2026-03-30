@@ -5,6 +5,10 @@ requireAdmin();
 $user = currentUser();
 $pdo = getDb();
 
+$flashSuccess = $_SESSION['flash_success'] ?? null;
+$flashError = $_SESSION['flash_error'] ?? null;
+unset($_SESSION['flash_success'], $_SESSION['flash_error']);
+
 $totalStudents = (int) $pdo->query('SELECT COUNT(*) FROM tbl_users WHERE role = "student"')->fetchColumn();
 $totalCourses = (int) $pdo->query('SELECT COUNT(*) FROM tbl_course')->fetchColumn();
 $totalEnrollments = (int) $pdo->query('SELECT COUNT(*) FROM tbl_enrollments')->fetchColumn();
