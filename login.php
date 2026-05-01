@@ -1,10 +1,8 @@
 <?php
 require_once __DIR__ . '/includes/auth.php';
 
-if (isLoggedIn()) {
-    $role = $_SESSION['role'] ?? '';
-    redirect($role === 'admin' ? base_url('admin/') : base_url('student/'));
-}
+
+
 
 $error = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
